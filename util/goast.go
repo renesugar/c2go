@@ -175,7 +175,31 @@ func NewBinaryExpr(left goast.Expr, operator token.Token, right goast.Expr,
 		Op: operator,
 		Y:  right,
 	}
+	if !stmt && isAssignishOperator(operator) {
+		return NewFuncClosure(returnType, NewExprStmt(b), &goast.ReturnStmt{
+			Results: []goast.Expr{left},
+		})
+	}
 	return b
+}
+
+func isAssignishOperator(t token.Token) bool {
+	switch t {
+	case token.ADD_ASSIGN, // +=
+		token.SUB_ASSIGN,     // -=
+		token.MUL_ASSIGN,     // *=
+		token.QUO_ASSIGN,     // /=
+		token.REM_ASSIGN,     // %=
+		token.AND_ASSIGN,     // &=
+		token.OR_ASSIGN,      // |=
+		token.XOR_ASSIGN,     // ^=
+		token.SHL_ASSIGN,     // <<=
+		token.SHR_ASSIGN,     // >>=
+		token.AND_NOT_ASSIGN, // &^=
+		token.ASSIGN:         // =
+		return true
+	}
+	return false
 }
 
 // NewIdent - create a new Go ast Ident
@@ -234,6 +258,29 @@ func NewFloatLit(value float64) *goast.BasicLit {
 	}
 }
 
+// NewVaListTag creates a new VaList Literal.
+func NewVaListTag() goast.Expr {
+	var p token.Pos
+	elts := make([]goast.Expr, 2)
+	elts[0] = &goast.KeyValueExpr{
+		Key:   &goast.BasicLit{Kind: token.STRING, Value: "Pos"},
+		Colon: p,
+		Value: &goast.BasicLit{Kind: token.STRING, Value: "0"},
+	}
+	elts[1] = &goast.KeyValueExpr{
+		Key:   &goast.BasicLit{Kind: token.STRING, Value: "Args"},
+		Colon: p,
+		Value: &goast.BasicLit{Kind: token.STRING, Value: "c2goArgs"},
+	}
+
+	return &goast.CompositeLit{
+		Type:   &goast.BasicLit{Kind: token.STRING, Value: "noarch.VaList"},
+		Lbrace: p,
+		Elts:   elts,
+		Rbrace: p,
+	}
+}
+
 // NewNil returns a Go AST identity that can be used to represent "nil".
 func NewNil() *goast.Ident {
 	return NewIdent("nil")
@@ -281,10 +328,20 @@ func ConvertFunctionNameFromCtoGo(name string) string {
 // GetUintptrForSlice - return uintptr for slice
 // Example : uint64(uintptr(unsafe.Pointer((*(**int)(unsafe.Pointer(& ...slice... )))))))
 func GetUintptrForSlice(expr goast.Expr) (goast.Expr, string) {
-	returnType := "long"
+	returnType := "long long"
 
+	var unsafePointer goast.Expr
+	if IsAddressable(expr) {
+		unsafePointer = NewCallExpr("unsafe.Pointer", &goast.UnaryExpr{
+			Op: token.AND,
+			X:  expr,
+		})
+	} else {
+		// pointer to a tempVar, but since we directly dereference, we are good
+		unsafePointer = ToUnsafePointer(expr)
+	}
 	return &goast.CallExpr{
-		Fun:    goast.NewIdent("uint64"),
+		Fun:    goast.NewIdent("int64"),
 		Lparen: 1,
 		Args: []goast.Expr{&goast.CallExpr{
 			Fun:    goast.NewIdent("uintptr"),
@@ -309,17 +366,7 @@ func GetUintptrForSlice(expr goast.Expr) (goast.Expr, string) {
 							},
 						},
 						Lparen: 1,
-						Args: []goast.Expr{&goast.CallExpr{
-							Fun: &goast.SelectorExpr{
-								X:   goast.NewIdent("unsafe"),
-								Sel: goast.NewIdent("Pointer"),
-							},
-							Lparen: 1,
-							Args: []goast.Expr{&goast.UnaryExpr{
-								Op: token.AND,
-								X:  expr,
-							}},
-						}},
+						Args:   []goast.Expr{unsafePointer},
 					},
 				}},
 			}},
@@ -347,6 +394,34 @@ func CreateSliceFromReference(goType string, expr goast.Expr) *goast.SliceExpr {
 	return &goast.SliceExpr{
 		X: NewCallExpr(
 			fmt.Sprintf("(*[1]%s)", goType),
+			NewCallExpr("unsafe.Pointer", &goast.UnaryExpr{
+				X:  expr,
+				Op: token.AND,
+			}),
+		),
+	}
+}
+
+// CreateUnlimitedSliceFromReference - create a slice, like :
+// (*[1000000000]int)(unsafe.Pointer(&a))[:]
+func CreateUnlimitedSliceFromReference(goType string, expr goast.Expr) *goast.SliceExpr {
+	// If the Go type is blank it means that the C type is 'void'.
+	if goType == "" {
+		goType = "interface{}"
+	}
+
+	// This is a hack to convert a reference to a variable into a slice that
+	// points to the same location. It will look similar to:
+	//
+	//     (*[1000000000]int)(unsafe.Pointer(&a))[:]
+	//
+	// You must always call this Go before using CreateUnlimitedSliceFromReference:
+	//
+	//     p.AddImport("unsafe")
+	//
+	return &goast.SliceExpr{
+		X: NewCallExpr(
+			fmt.Sprintf("(*[1000000000]%s)", goType),
 			NewCallExpr("unsafe.Pointer", &goast.UnaryExpr{
 				X:  expr,
 				Op: token.AND,
@@ -402,7 +477,7 @@ func NewAnonymousFunction(body, deferBody []goast.Stmt,
 	returnValue goast.Expr,
 	returnType string) *goast.CallExpr {
 
-	if deferBody != nil {
+	if len(deferBody) > 0 {
 		body = append(body, []goast.Stmt{&goast.DeferStmt{
 			Defer: 1,
 			Call: &goast.CallExpr{
@@ -427,4 +502,37 @@ func NewAnonymousFunction(body, deferBody []goast.Stmt,
 			}),
 		},
 	}}
+}
+
+// IsAddressable returns whether it's possible to obtain an address of expr
+// using the unary & operator.
+func IsAddressable(expr goast.Expr) bool {
+	if _, ok := expr.(*goast.Ident); ok {
+		return true
+	}
+	if ie, ok := expr.(*goast.IndexExpr); ok {
+		return IsAddressable(ie.X)
+	}
+	if pe, ok := expr.(*goast.ParenExpr); ok {
+		return IsAddressable(pe.X)
+	}
+	return false
+}
+
+// ToUnsafePointer returns an unsafe Pointer to a temporary Variable to which the
+// given expr is assigned.
+func ToUnsafePointer(expr goast.Expr) goast.Expr {
+	var body []goast.Stmt
+	varName := "tempVar"
+
+	body = append(body, &goast.AssignStmt{
+		Lhs: []goast.Expr{NewIdent(varName)},
+		Tok: token.DEFINE,
+		Rhs: []goast.Expr{expr},
+	})
+	returnValue := NewCallExpr("unsafe.Pointer", &goast.UnaryExpr{
+		X:  NewIdent(varName),
+		Op: token.AND,
+	})
+	return NewAnonymousFunction(body, nil, returnValue, "unsafe.Pointer")
 }

@@ -98,6 +98,14 @@ func CastExpr(p *program.Program, expr goast.Expr, cFromType, cToType string) (
 		return expr, nil
 	}
 
+	// Exception for va_list:
+	// A pointer to struct __va_list_tag is always a variable called
+	// "c2goVaList" in go.
+	if fromType == "va_list" && toType == "struct __va_list_tag *" {
+		ret := &goast.BasicLit{Kind: token.STRING, Value: "c2goVaList"}
+		return ret, nil
+	}
+
 	// casting
 	if fromType == "void *" && toType[len(toType)-1] == '*' && !strings.Contains(toType, "FILE") && toType[len(toType)-2] != '*' {
 		toType = strings.Replace(toType, "*", " ", -1)
@@ -105,13 +113,21 @@ func CastExpr(p *program.Program, expr goast.Expr, cFromType, cToType string) (
 		if err != nil {
 			return nil, err
 		}
-		return &goast.TypeAssertExpr{
-			X:      expr,
-			Lparen: 1,
-			Type: &goast.ArrayType{
-				Lbrack: 1,
-				Elt:    util.NewIdent(t),
-			}}, nil
+		p.AddImport("unsafe")
+		p.AddImport("github.com/elliotchance/c2go/noarch")
+		return &goast.UnaryExpr{
+			Op: token.MUL,
+			X: &goast.CallExpr{
+				Fun: &goast.StarExpr{
+					X: &goast.ArrayType{
+						Lbrack: 1,
+						Elt:    util.NewIdent(t),
+					},
+				},
+				Args: []goast.Expr{util.NewCallExpr("unsafe.Pointer",
+					util.NewCallExpr("noarch.UnsafeSliceToSliceUnlimited", expr))},
+			},
+		}, nil
 	}
 
 	// Checking amount recursive typedef element
@@ -136,7 +152,7 @@ func CastExpr(p *program.Program, expr goast.Expr, cFromType, cToType string) (
 		}
 	}
 
-	// Checking registated typedef types in program
+	// Checking registered typedef types in program
 	if v, ok := p.TypedefType[toType]; ok {
 		if fromType == v {
 			toType, err := ResolveType(p, toType)
@@ -209,7 +225,7 @@ func CastExpr(p *program.Program, expr goast.Expr, cFromType, cToType string) (
 	if strings.Contains(fromType, "enum") && !strings.Contains(toType, "enum") {
 		in := goast.CallExpr{
 			Fun: &goast.Ident{
-				Name: "int",
+				Name: "int32",
 			},
 			Lparen: 1,
 			Args: []goast.Expr{
@@ -284,6 +300,13 @@ func CastExpr(p *program.Program, expr goast.Expr, cFromType, cToType string) (
 	}
 
 	if fromType == toType {
+		match := util.GetRegex(`\[(\d+)\]$`).FindStringSubmatch(cFromType)
+		if strings.HasSuffix(cToType, "*") && len(match) > 0 {
+			// we need to convert from array to slice
+			return &goast.SliceExpr{
+				X: expr,
+			}, nil
+		}
 		return expr, nil
 	}
 
@@ -303,7 +326,22 @@ func CastExpr(p *program.Program, expr goast.Expr, cFromType, cToType string) (
 		// Darwin specific
 		"__darwin_ct_rune_t", "darwin.CtRuneT",
 	}
+	unsigned := map[string]bool{"byte": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+		"__uint16_t": true, "size_t": true, "darwin_ct_rune_t": true, "darwin.CtRuneT": true}
+	var isFromNumber, isFromUnsigned, isToNumber, isToUnsigned bool
 	for _, v := range types {
+		if fromType == v {
+			isFromNumber = true
+			if b, ok := unsigned[v]; ok && b {
+				isFromUnsigned = true
+			}
+		}
+		if toType == v {
+			isToNumber = true
+			if b, ok := unsigned[v]; ok && b {
+				isToUnsigned = true
+			}
+		}
 		if fromType == v && toType == "bool" {
 			e := util.NewBinaryExpr(
 				expr,
@@ -316,10 +354,18 @@ func CastExpr(p *program.Program, expr goast.Expr, cFromType, cToType string) (
 			return e, nil
 		}
 		if fromType == "bool" && toType == v {
-			e := util.NewGoExpr(`map[bool]int{false: 0, true: 1}[replaceme]`)
+			e := util.NewGoExpr(`map[bool]int32{false: 0, true: 1}[replaceme]`)
 			// Swap replaceme with the current expression
 			e.(*goast.IndexExpr).Index = expr
 			return CastExpr(p, e, "int", cToType)
+		}
+	}
+	if isFromNumber && isToNumber && isToUnsigned && !isFromUnsigned {
+		// To fix x overflows unsigned we swap cast and complement operator.
+		if e, ok := expr.(*goast.UnaryExpr); ok && e.Op == token.XOR {
+			c, err := CastExpr(p, e.X, cFromType, cToType)
+			e.X = c
+			return e, err
 		}
 	}
 
@@ -429,8 +475,40 @@ func CastExpr(p *program.Program, expr goast.Expr, cFromType, cToType string) (
 		return expr, nil
 	}
 
+	exportedLeftName := util.GetExportedName(leftName)
+	exportedRightName := util.GetExportedName(rightName)
 	functionName := fmt.Sprintf("noarch.%sTo%s",
-		util.GetExportedName(leftName), util.GetExportedName(rightName))
+		exportedLeftName, exportedRightName)
+
+	if strings.HasSuffix(exportedLeftName, "Slice") && strings.HasSuffix(exportedRightName, "Slice") {
+		p.AddMessage(fmt.Sprintf("// Warning: using unsafe slice cast to convert from %s to %s", fromType, toType))
+		fromSize, err := SizeOf(p, GetBaseType(cFromType))
+		if err != nil {
+			return nil, err
+		}
+		toSize, err := SizeOf(p, GetBaseType(cToType))
+		if err != nil {
+			return nil, err
+		}
+		if _, arrSize := GetArrayTypeAndSize(cFromType); arrSize > 0 {
+			expr = &goast.SliceExpr{X: expr}
+		}
+		return &goast.StarExpr{
+			X: &goast.CallExpr{
+				Fun: &goast.StarExpr{
+					X: &goast.Ident{
+						Name: toType,
+					},
+				},
+				Lparen: 1,
+				Args: []goast.Expr{
+					util.NewCallExpr("unsafe.Pointer",
+						util.NewCallExpr("noarch.UnsafeSliceToSlice", expr, util.NewIntLit(fromSize), util.NewIntLit(toSize))),
+				},
+				Rparen: 2,
+			},
+		}, nil
+	}
 
 	// FIXME: This is a hack to get SQLite3 to transpile.
 	if strings.Contains(functionName, "RowSetEntry") {

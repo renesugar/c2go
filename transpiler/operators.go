@@ -246,10 +246,21 @@ func pointerArithmetic(p *program.Program,
 		s.Operator = "-"
 	}
 
-	src := `package main
+	var src string
+	if util.IsAddressable(left) {
+		src = `package main
 func main(){
 	a := (*(*[1000000000]{{ .Type }})(unsafe.Pointer(uintptr(unsafe.Pointer(&{{ .Name }}[0])) {{ .Operator }} (uintptr)({{ .Condition }})*unsafe.Sizeof({{ .Name }}[0]))))[:]
 }`
+	} else {
+		src = `package main
+func main(){
+	a := (*(*[1000000000]{{ .Type }})(unsafe.Pointer(func()uintptr{
+		tempVar := {{ .Name }}
+		return uintptr(unsafe.Pointer(&tempVar[0])) {{ .Operator }} (uintptr)({{ .Condition }})*unsafe.Sizeof(tempVar[0])
+	}())))[:]
+}`
+	}
 	tmpl := template.Must(template.New("").Parse(src))
 	var source bytes.Buffer
 	err = tmpl.Execute(&source, s)
@@ -312,13 +323,8 @@ func transpileCompoundAssignOperator(
 			return nil, "", nil, nil, fmt.Errorf("Expr is nil")
 		}
 		preStmts, postStmts = combinePreAndPostStmts(preStmts, postStmts, newPre, newPost)
-		var name string
-		name, err = getName(p, n.Children()[0])
-		if err != nil {
-			return nil, "", nil, nil, err
-		}
 		v = &goast.BinaryExpr{
-			X:  goast.NewIdent(name),
+			X:  left,
 			Op: token.ASSIGN,
 			Y:  v,
 		}
@@ -337,6 +343,12 @@ func transpileCompoundAssignOperator(
 		}
 	}
 
+	switch operator {
+	case token.AND_ASSIGN, token.OR_ASSIGN, token.XOR_ASSIGN, token.AND_NOT_ASSIGN:
+		right, err = types.CastExpr(p, right, rightType, leftType)
+		p.AddMessage(p.GenerateWarningMessage(err, n))
+	}
+
 	resolvedLeftType, err := types.ResolveType(p, leftType)
 	if err != nil {
 		p.AddMessage(p.GenerateWarningMessage(err, n))
@@ -349,6 +361,11 @@ func transpileCompoundAssignOperator(
 	if left == nil {
 		err = fmt.Errorf("Left part is nil. err = %v", err)
 		return nil, "", nil, nil, err
+	}
+
+	right, err = types.CastExpr(p, right, rightType, leftType)
+	if err != nil {
+		p.AddMessage(p.GenerateWarningMessage(err, n))
 	}
 
 	return util.NewBinaryExpr(left, operator, right, resolvedLeftType, exprIsStmt),
@@ -483,7 +500,7 @@ func atomicOperation(n ast.Node, p *program.Program) (
 	switch v := n.(type) {
 	case *ast.UnaryOperator:
 		switch v.Operator {
-		case "&", "*", "!", "-":
+		case "&", "*", "!", "-", "~":
 			return
 		}
 		// UnaryOperator 0x252d798 <col:17, col:18> 'double' prefix '-'
@@ -495,13 +512,17 @@ func atomicOperation(n ast.Node, p *program.Program) (
 			return
 		}
 
+		// ++, -- anonymous functions are handled here below
+		expr, exprType, preStmts, postStmts, err = transpileToExpr(n, p, true)
+
 		// UnaryOperator 0x3001768 <col:204, col:206> 'int' prefix '++'
 		// `-DeclRefExpr 0x3001740 <col:206> 'int' lvalue Var 0x303e888 'current_test' 'int'
 		// OR
 		// UnaryOperator 0x3001768 <col:204, col:206> 'int' postfix '++'
 		// `-DeclRefExpr 0x3001740 <col:206> 'int' lvalue Var 0x303e888 'current_test' 'int'
 		var varName string
-		if vv, ok := v.Children()[0].(*ast.DeclRefExpr); ok {
+		var vv *ast.DeclRefExpr
+		if vv, err = getSoleChildDeclRefExpr(v); err == nil {
 			varName = vv.Name
 
 			var exprResolveType string
@@ -623,6 +644,8 @@ func atomicOperation(n ast.Node, p *program.Program) (
 				return
 			}
 
+			// since we will explicitly use an anonymous function, we can transpileToExpr as a statement
+			expr, exprType, preStmts, postStmts, err = transpileToExpr(n, p, true)
 			expr = util.NewAnonymousFunction(append(preStmts, &goast.ExprStmt{expr}),
 				postStmts,
 				util.NewIdent(varName),
@@ -801,7 +824,7 @@ func atomicOperation(n ast.Node, p *program.Program) (
 			//     `-DeclRefExpr 0x3c42400 <col:32> 'int' lvalue Var 0x3c3cf60 'iterator' 'int'
 			varName := "tempVar"
 
-			expr, exprType, preStmts, postStmts, err = transpileToExpr(v.Children()[0], p, false)
+			expr, exprType, preStmts, postStmts, err = transpileToExpr(v.Children()[0], p, true)
 			if err != nil {
 				return
 			}
@@ -880,7 +903,7 @@ func atomicOperation(n ast.Node, p *program.Program) (
 				return
 			}
 
-			e, _, newPre, newPost, _ := transpileToExpr(v, p, false)
+			e, _, newPre, newPost, _ := transpileToExpr(v, p, true)
 			body := combineStmts(&goast.ExprStmt{e}, newPre, newPost)
 
 			expr, exprType, _, _, _ = atomicOperation(v.Children()[0], p)

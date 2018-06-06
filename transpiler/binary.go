@@ -160,9 +160,8 @@ func transpileBinaryOperator(n *ast.BinaryOperator, p *program.Program, exprIsSt
 				bComma.AddChild(c)
 				bComma.AddChild(&bSecond)
 
-				// exprIsStmt now changes to false to stop any AST children from
-				// not being safely wrapped in a closure.
-				return transpileBinaryOperator(&bComma, p, false)
+				// goast.NewBinaryExpr takes care to wrap any AST children safely in a closure, if needed.
+				return transpileBinaryOperator(&bComma, p, exprIsStmt)
 			}
 		}
 	}
@@ -191,7 +190,7 @@ func transpileBinaryOperator(n *ast.BinaryOperator, p *program.Program, exprIsSt
 	// | `-ImplicitCastExpr 0x21a7898 <col:6> 'int' <LValueToRValue>
 	// |   `-DeclRefExpr 0x21a7870 <col:6> 'int' lvalue Var 0x21a7748 'y' 'int'
 	if getTokenForOperator(n.Operator) == token.COMMA {
-		stmts, _, newPre, newPost, err := transpileToExpr(n.Children()[0], p, false)
+		stmts, _, newPre, newPost, err := transpileToExpr(n.Children()[0], p, exprIsStmt)
 		if err != nil {
 			return nil, "unknown50", nil, nil, err
 		}
@@ -200,7 +199,7 @@ func transpileBinaryOperator(n *ast.BinaryOperator, p *program.Program, exprIsSt
 		preStmts = append(preStmts, newPost...)
 
 		var st string
-		stmts, st, newPre, newPost, err = transpileToExpr(n.Children()[1], p, false)
+		stmts, st, newPre, newPost, err = transpileToExpr(n.Children()[1], p, exprIsStmt)
 		if err != nil {
 			return nil, "unknown51", nil, nil, err
 		}
@@ -224,7 +223,21 @@ func transpileBinaryOperator(n *ast.BinaryOperator, p *program.Program, exprIsSt
 	if err != nil {
 		return nil, "unknown53", nil, nil, err
 	}
-	if types.IsPointer(leftType) && types.IsPointer(rightType) && operator == token.SUB {
+	var adjustPointerDiff int
+	if types.IsPointer(leftType) && types.IsPointer(rightType) &&
+		(operator == token.SUB ||
+			operator == token.LSS || operator == token.GTR ||
+			operator == token.LEQ || operator == token.GEQ) {
+		baseSize, err := types.SizeOf(p, types.GetBaseType(leftType))
+		if operator == token.SUB && err == nil && baseSize > 1 {
+			adjustPointerDiff = baseSize
+		}
+		left, leftType = util.GetUintptrForSlice(left)
+		right, rightType = util.GetUintptrForSlice(right)
+	}
+	if types.IsPointer(leftType) && types.IsPointer(rightType) &&
+		(operator == token.EQL || operator == token.NEQ) &&
+		leftType != "NullPointerType *" && rightType != "NullPointerType *" {
 		left, leftType = util.GetUintptrForSlice(left)
 		right, rightType = util.GetUintptrForSlice(right)
 	}
@@ -296,6 +309,7 @@ func transpileBinaryOperator(n *ast.BinaryOperator, p *program.Program, exprIsSt
 
 	if operator == token.NEQ || operator == token.EQL ||
 		operator == token.LSS || operator == token.GTR ||
+		operator == token.LEQ || operator == token.GEQ ||
 		operator == token.AND || operator == token.ADD ||
 		operator == token.SUB || operator == token.MUL ||
 		operator == token.QUO || operator == token.REM {
@@ -309,6 +323,7 @@ func transpileBinaryOperator(n *ast.BinaryOperator, p *program.Program, exprIsSt
 			rightType = leftType
 			p.AddMessage(p.GenerateWarningOrErrorMessage(err, n, right == nil))
 		}
+
 	}
 
 	if operator == token.ASSIGN {
@@ -327,7 +342,7 @@ func transpileBinaryOperator(n *ast.BinaryOperator, p *program.Program, exprIsSt
 		} else {
 			right, err = types.CastExpr(p, right, rightType, returnType)
 
-			if _, ok := right.(*goast.UnaryExpr); ok && types.IsDereferenceType(rightType) {
+			if ue, ok := right.(*goast.UnaryExpr); ok && types.IsDereferenceType(rightType) && ue.Op == token.AND {
 				deref, err := types.GetDereferenceType(rightType)
 
 				if !p.AddMessage(p.GenerateWarningMessage(err, n)) {
@@ -350,6 +365,10 @@ func transpileBinaryOperator(n *ast.BinaryOperator, p *program.Program, exprIsSt
 			}
 
 		}
+	}
+
+	if operator == token.ADD_ASSIGN || operator == token.SUB_ASSIGN {
+		right, err = types.CastExpr(p, right, rightType, returnType)
 	}
 
 	var resolvedLeftType = n.Type
@@ -386,6 +405,14 @@ func transpileBinaryOperator(n *ast.BinaryOperator, p *program.Program, exprIsSt
 		err = fmt.Errorf("right part of binary operation is nil. right : %#v", n.Children()[1])
 		p.AddMessage(p.GenerateWarningMessage(err, n))
 		return nil, "", nil, nil, err
+	}
+
+	if adjustPointerDiff > 0 {
+		expr := util.NewBinaryExpr(left, operator, right, resolvedLeftType, exprIsStmt)
+		returnType = types.ResolveTypeForBinaryOperator(p, n.Operator, leftType, rightType)
+		return util.NewBinaryExpr(expr, token.QUO, util.NewIntLit(adjustPointerDiff), returnType, exprIsStmt),
+			returnType,
+			preStmts, postStmts, nil
 	}
 
 	return util.NewBinaryExpr(left, operator, right, resolvedLeftType, exprIsStmt),
@@ -476,10 +503,14 @@ func generateAlloc(p *program.Program, allocSize ast.Node, leftType string) (
 		return nil, preStmts, postStmts, err
 	}
 
+	if toType == "interface{}" {
+		toType = "[]uint8"
+	}
+
 	right = util.NewCallExpr(
 		"make",
 		util.NewTypeIdent(toType),
-		util.NewBinaryExpr(allocSizeExpr, token.QUO, util.NewIntLit(elementSize), "int", false),
+		util.NewBinaryExpr(allocSizeExpr, token.QUO, util.NewIntLit(elementSize), "int32", false),
 	)
 	return
 }

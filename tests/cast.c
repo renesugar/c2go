@@ -81,14 +81,89 @@ void test_strCh()
 	is_eq(strlenChar(z),11);
 }
 
+typedef unsigned int pcre_uint32;
+#define CHAR_NBSP                   ((unsigned char)'\xa0')
+
+void test_preprocessor()
+{
+    int tmp = 160;
+    pcre_uint32 chr = tmp;
+
+    is_eq(chr, CHAR_NBSP);
+}
+
+typedef unsigned char pcre_uchar;
+typedef unsigned char pcre_uint8;
+typedef struct pcre_study_data {
+    pcre_uint8 start_bits[32];
+} pcre_study_data;
+
+void caststr() {
+    pcre_uchar str[] = "abcd";
+    is_streq((char *) str, "abcd");
+}
+
+static const pcre_uchar TEST[] =  {
+  'x', (pcre_uchar) CHAR_NBSP, '\n', '\0' };
+
+#define CHAR_E ((unsigned char) 'e')
+static const pcre_uchar TEST2[] =  {
+  'x', (pcre_uchar) CHAR_NBSP, '\n',
+  (pcre_uchar) CHAR_E, '\0' };
+
+
+void test_static_array()
+{
+    is_eq('x', TEST[0]);
+    is_eq((pcre_uchar) '\xa0', TEST[1]);
+    is_eq('\n', TEST[2]);
+    is_eq('x', TEST2[0]);
+    is_eq('e', TEST2[3]); // can distinguish character at same column in different lines
+}
+
+void castbitwise() {
+    pcre_uint32 x = 0xff;
+    x &= ~0x3c;
+    is_eq(x, 0xc3);
+}
+
+void cast_pointer_diff(pcre_uchar *str, int *x) {
+    pcre_uchar *p = str;
+    pcre_uchar ab = '\0';
+    *x = (int)(p - str) - ab;
+}
+
+typedef unsigned char x_uint;
+typedef unsigned char y_uint;
+typedef struct {
+    unsigned char a;
+    unsigned char b;
+} z_struct;
+
+void test_voidcast()
+{
+    x_uint x = 42;
+    void * y = &x;
+    y_uint *z = (y_uint*) y;
+    is_eq(42, *z);
+    x_uint arr1[] = { 1, 2, 3, 4 };
+    y = arr1;
+    z_struct *arr2 = (z_struct*) y;
+    is_eq(1, arr2[0].a);
+    is_eq(2, arr2[0].b);
+    is_eq(3, arr2[1].a);
+    is_eq(4, arr2[1].b);
+}
+
 int main()
 {
-    plan(29);
+    plan(44);
 
     START_TEST(cast);
     START_TEST(castbool);
     START_TEST(vertex);
     START_TEST(strCh);
+    START_TEST(voidcast);
 
 	{
 	typedef unsigned int u32;
@@ -170,6 +245,35 @@ int main()
 	}
 
 	char_overflow();
+
+    diag("Compare preprocessor with type")
+    test_preprocessor();
+
+    diag("Typedef slice convertion")
+    caststr();
+
+    diag("Compare with static array")
+    test_static_array();
+
+    diag("Cast with compound assign operator")
+    castbitwise();
+
+    diag("Cast pointer diff");
+    {
+        pcre_uchar s[] = "abcd";
+        int b = 42;
+        cast_pointer_diff(&s[0], &b);
+        is_eq(b, 0);
+    }
+	diag("Cast array to slice");
+    {
+        pcre_study_data sdata;
+        sdata.start_bits[1] = 42;
+        const pcre_study_data *study = &sdata;
+        const pcre_uint8 *p = 0;
+        p = study->start_bits;
+        is_eq(p[1], 42);
+    }
 
     done_testing();
 }

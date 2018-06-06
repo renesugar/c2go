@@ -23,6 +23,8 @@ without modification. This will be the 1.0.0 release.
 
 # Installation
 
+`c2go` requires Go 1.9 or newer.
+
 ```bash
 go get -u github.com/elliotchance/c2go
 ```
@@ -123,11 +125,6 @@ func __init() {
 	stderr = noarch.Stderr
 }
 ```
-
-# What Is Supported?
-
-See the
-[Project Progress](https://github.com/elliotchance/c2go/wiki/Project-Progress).
 
 # How It Works
 

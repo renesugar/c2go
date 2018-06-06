@@ -6,7 +6,7 @@
 //
 // Usage
 //
-//     c2go myfile.c
+//     c2go transpile myfile.c
 //
 package main
 
@@ -259,6 +259,17 @@ func Start(args ProgramArgs) (err error) {
 	}
 	tree := buildTree(nodes, 0)
 	ast.FixPositions(tree)
+	p.SetNodes(tree)
+
+	// Repair the character literals. See RepairCharacterLiteralsFromSource for
+	// more information.
+	characterErrors := ast.RepairCharacterLiteralsFromSource(tree[0], ppFilePath)
+
+	for _, cErr := range characterErrors {
+		message := fmt.Sprintf("could not read exact character literal: %s",
+			cErr.Err.Error())
+		p.AddMessage(p.GenerateWarningMessage(errors.New(message), cErr.Node))
+	}
 
 	// Repair the floating literals. See RepairFloatingLiteralsFromSource for
 	// more information.
@@ -327,6 +338,7 @@ var clangFlags inputDataFlags
 
 func init() {
 	transpileCommand.Var(&clangFlags, "clang-flag", "Pass arguments to clang. You may provide multiple -clang-flag items.")
+	astCommand.Var(&clangFlags, "clang-flag", "Pass arguments to clang. You may provide multiple -clang-flag items.")
 }
 
 var (
@@ -394,6 +406,7 @@ func runCommand() int {
 
 		args.ast = true
 		args.inputFiles = astCommand.Args()
+		args.clangFlags = clangFlags
 	case "transpile":
 		err := transpileCommand.Parse(os.Args[2:])
 		if err != nil {

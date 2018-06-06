@@ -343,9 +343,34 @@ void struct_inside_union()
 	is_true(s.d != 0);
 }
 
+typedef int pointx;
+typedef struct  {
+    pointx x;
+    int y;
+} Point2;
+const Point2 p2[] = { { .y = 4, .x = 5 } };
+const Point2* getPoint(int index) {
+    return &(p2[index]);
+}
+typedef unsigned char pcre_uchar;
+typedef struct spu {
+    pcre_uchar *hvm;
+} spu;
+
+void pointer_arithm_in_struct() {
+    pcre_uchar str[] = "abcd";
+    spu s;
+    spu *ps = &s;
+    ps->hvm = &str[1];
+    is_true(ps->hvm == &str[1]);
+    ps->hvm += 2;
+    is_true(ps->hvm == &str[3]);
+
+}
+
 int main()
 {
-    plan(68);
+    plan(71);
 
     struct programming variable;
     char *s = "Programming in Software Development.";
@@ -420,6 +445,11 @@ int main()
 	struct Point p = { .y = 2, .x = 3 };
 	is_eq(p.x, 3);
 	is_eq(p.y, 2);
+
+	diag("Initialization of a const struct pointer")
+	const Point2* pp2 = getPoint(0);
+	int pointSum = pp2->x + pp2->y;
+	is_eq(pointSum, 9);
 
 	diag("ImplicitValueInitExpr")
 	{
@@ -598,6 +628,8 @@ int main()
 	func_in_func_in_struct();
 
 	struct_inside_union();
+
+	pointer_arithm_in_struct();
 
     done_testing();
 }

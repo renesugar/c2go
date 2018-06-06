@@ -122,7 +122,7 @@ var builtInFunctionDefinitions = map[string][]string{
 		"double fabs(double) -> math.Abs",
 		"double floor(double) -> math.Floor",
 		"double fmod(double, double) -> math.Mod",
-		"double ldexp(double, int) -> math.Ldexp",
+		"double ldexp(double, int) -> noarch.Ldexp",
 		"double log(double) -> math.Log",
 		"double log10(double) -> math.Log10",
 		"double pow(double, double) -> math.Pow",
@@ -152,6 +152,7 @@ var builtInFunctionDefinitions = map[string][]string{
 		"char* fgets(char*, int, FILE*) -> noarch.Fgets",
 		"void rewind(FILE*) -> noarch.Rewind",
 		"int feof(FILE*) -> noarch.Feof",
+		"int ferror(FILE*) -> noarch.Ferror",
 		"char* tmpnam(char*) -> noarch.Tmpnam",
 		"int fflush(FILE*) -> noarch.Fflush",
 		"int fprintf(FILE*, const char*) -> noarch.Fprintf",
@@ -163,25 +164,32 @@ var builtInFunctionDefinitions = map[string][]string{
 		"int putc(int, FILE*) -> noarch.Fputc",
 		"int fseek(FILE*, long int, int) -> noarch.Fseek",
 		"long ftell(FILE*) -> noarch.Ftell",
-		"int fread(void*, int, int, FILE*) -> $0 = noarch.Fread(&1, $2, $3, $4)",
+		"int fread(void*, int, int, FILE*) -> noarch.Fread",
 		"int fwrite(char*, int, int, FILE*) -> noarch.Fwrite",
 		"int fgetpos(FILE*, int*) -> noarch.Fgetpos",
 		"int fsetpos(FILE*, int*) -> noarch.Fsetpos",
 		"int sprintf(char*, const char *) -> noarch.Sprintf",
 		"int snprintf(char*, int, const char *) -> noarch.Snprintf",
-		"int vsprintf(char*, const char *) -> noarch.Vsprintf",
-		"int vsnprintf(char*, int, const char *) -> noarch.Vsnprintf",
+		"int vsprintf(char*, const char *, struct __va_list_tag *) -> noarch.Vsprintf",
+		"int vsnprintf(char*, int, const char *, struct __va_list_tag *) -> noarch.Vsnprintf",
+		"void perror(char*) -> noarch.Perror",
+		"void clearerr(FILE*) -> noarch.Clearerr",
 
 		// darwin/stdio.h
 		"int __builtin___sprintf_chk(char*, int, int, char*) -> darwin.BuiltinSprintfChk",
 		"int __builtin___snprintf_chk(char*, int, int, int, char*) -> darwin.BuiltinSnprintfChk",
-		"int __builtin___vsprintf_chk(char*, int, int, char*) -> darwin.BuiltinVsprintfChk",
-		"int __builtin___vsnprintf_chk(char*, int, int, int, char*) -> darwin.BuiltinVsnprintfChk",
+		"int __builtin___vsprintf_chk(char*, int, int, char *, struct __va_list_tag *) -> darwin.BuiltinVsprintfChk",
+		"int __builtin___vsnprintf_chk(char*, int, int, int, char*, struct __va_list_tag *) -> darwin.BuiltinVsnprintfChk",
 	},
 	"string.h": []string{
 		// string.h
+		"char* strcasestr(const char*, const char*) -> noarch.Strcasestr",
 		"char* strcat(char *, const char *) -> noarch.Strcat",
 		"int strcmp(const char *, const char *) -> noarch.Strcmp",
+		"char* strerror(int) -> noarch.Strerror",
+
+		// should be: "int strncmp(const char*, const char*, size_t) -> noarch.Strncmp",
+		"int strncmp(const char *, const char *, int) -> noarch.Strncmp",
 		"char * strchr(char *, int) -> noarch.Strchr",
 
 		"char* strcpy(const char*, char*) -> noarch.Strcpy",
@@ -191,6 +199,20 @@ var builtInFunctionDefinitions = map[string][]string{
 		// real return type is "size_t", but it is changed to "int"
 		// in according to noarch.Strlen
 		"int strlen(const char*) -> noarch.Strlen",
+
+		"char* strstr(const char*, const char*) -> noarch.Strstr",
+
+		// should be: "void* memset(void *, int, size_t) -> noarch.Memset"
+		"void* memset(void *, int, int) -> noarch.Memset",
+
+		// should be: "void* memcpy(void *, void *, size_t) -> noarch.Memcpy"
+		"void* memcpy(void *, void *, int) -> noarch.Memcpy",
+
+		// should be: "void* memmove(void *, void *, size_t) -> noarch.Memcpy"
+		"void* memmove(void *, void *, int) -> noarch.Memcpy",
+
+		// should be: "int memmove(const void *, const void *, size_t) -> noarch.Memcmp"
+		"int memcmp(void *, void *, int) -> noarch.Memcmp",
 
 		// darwin/string.h
 		// should be: const char*, char*, size_t
@@ -204,6 +226,12 @@ var builtInFunctionDefinitions = map[string][]string{
 		// see https://opensource.apple.com/source/Libc/Libc-763.12/include/secure/_string.h.auto.html
 		"char* __builtin___strcat_chk(char *, const char *, int) -> darwin.BuiltinStrcat",
 		"char* __inline_strcat_chk(char *, const char *) -> noarch.Strcat",
+		"void* __builtin___memset_chk(void *, int, int, int) -> darwin.Memset",
+		"void* __inline_memset_chk(void *, int, int) -> noarch.Memset",
+		"void* __builtin___memcpy_chk(void *, void *, int, int) -> darwin.Memcpy",
+		"void* __inline_memcpy_chk(void *, void *, int) -> noarch.Memcpy",
+		"void* __builtin___memmove_chk(void *, void *, int, int) -> darwin.Memcpy",
+		"void* __inline_memmove_chk(void *, void *, int) -> noarch.Memcpy",
 	},
 	"stdlib.h": []string{
 		// stdlib.h
@@ -213,14 +241,14 @@ var builtInFunctionDefinitions = map[string][]string{
 		"long int atol(const char*) -> noarch.Atol",
 		"long long int atoll(const char*) -> noarch.Atoll",
 		"div_t div(int, int) -> noarch.Div",
-		"void exit(int) -> os.Exit",
+		"void exit(int) -> noarch.Exit",
 		"void free(void*) -> noarch.Free",
 		"char* getenv(const char *) -> noarch.Getenv",
 		"long int labs(long int) -> noarch.Labs",
 		"ldiv_t ldiv(long int, long int) -> noarch.Ldiv",
 		"long long int llabs(long long int) -> noarch.Llabs",
 		"lldiv_t lldiv(long long int, long long int) -> noarch.Lldiv",
-		"int rand() -> math/rand.Int",
+		"int rand() -> noarch.Rand",
 		// The real definition is srand(unsigned int) however the type would be
 		// different. It's easier to change the definition than create a proxy
 		// function in stdlib.go.
@@ -233,6 +261,13 @@ var builtInFunctionDefinitions = map[string][]string{
 		"long unsigned int strtoul(const char *, char **, int) -> noarch.Strtoul",
 		"long long unsigned int strtoull(const char *, char **, int) -> noarch.Strtoull",
 		"void free(void*) -> _",
+	},
+	"syslog.h": []string{
+		"void openlog(const char *, int, int) -> noarch.Openlog",
+		"int setlogmask(int) -> noarch.Setlogmask",
+		"void syslog(int, const char *) -> noarch.Syslog",
+		"void vsyslog(int, const char *, struct __va_list_tag *) -> noarch.Vsyslog",
+		"void closelog(void) -> noarch.Closelog",
 	},
 	"time.h": []string{
 		// time.h
@@ -247,6 +282,13 @@ var builtInFunctionDefinitions = map[string][]string{
 		// I'm not sure which header file these comes from?
 		"uint32 __builtin_bswap32(uint32) -> darwin.BSwap32",
 		"uint64 __builtin_bswap64(uint64) -> darwin.BSwap64",
+	},
+	"errno.h": []string{
+		// linux
+		"int * __errno_location() -> noarch.Errno",
+
+		// darwin
+		"int * __error() -> noarch.Errno",
 	},
 }
 

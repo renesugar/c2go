@@ -9,6 +9,7 @@ import (
 	"github.com/elliotchance/c2go/program"
 	"github.com/elliotchance/c2go/types"
 	"github.com/elliotchance/c2go/util"
+	"go/token"
 )
 
 func transpileImplicitCastExpr(n *ast.ImplicitCastExpr, p *program.Program, exprIsStmt bool) (
@@ -34,6 +35,9 @@ func transpileImplicitCastExpr(n *ast.ImplicitCastExpr, p *program.Program, expr
 			return
 		}
 	}
+	if isCastToUnsignedOfUnaryComplement(n, p) {
+		return swapCastAndComplement(n, p, exprIsStmt)
+	}
 	expr, exprType, preStmts, postStmts, err = transpileToExpr(n.Children()[0], p, exprIsStmt)
 	if err != nil {
 		return nil, "", nil, nil, err
@@ -55,7 +59,7 @@ func transpileImplicitCastExpr(n *ast.ImplicitCastExpr, p *program.Program, expr
 		return
 	}
 
-	if !types.IsFunction(exprType) && n.Kind != ast.ImplicitCastExprArrayToPointerDecay {
+	if !types.IsFunction(exprType) && !strings.ContainsAny(n.Type, "[]") {
 		expr, err = types.CastExpr(p, expr, exprType, n.Type)
 		if err != nil {
 			return nil, "", nil, nil, err
@@ -63,6 +67,31 @@ func transpileImplicitCastExpr(n *ast.ImplicitCastExpr, p *program.Program, expr
 		exprType = n.Type
 	}
 	return
+}
+
+func isCastToUnsignedOfUnaryComplement(n *ast.ImplicitCastExpr, p *program.Program) (ret bool) {
+	if !types.IsCInteger(p, n.Type) || !strings.Contains(n.Type, "unsigned ") {
+		return
+	}
+	cn, ok := n.Children()[0].(*ast.UnaryOperator)
+	if !ok || getTokenForOperator(cn.Operator) != token.XOR {
+		return
+	}
+	return types.IsCInteger(p, cn.Type) && !strings.Contains(cn.Type, "unsigned ")
+}
+
+func swapCastAndComplement(n *ast.ImplicitCastExpr, p *program.Program, exprIsStmt bool) (
+	expr goast.Expr,
+	exprType string,
+	preStmts []goast.Stmt,
+	postStmts []goast.Stmt,
+	err error) {
+	uo := n.Children()[0].(*ast.UnaryOperator)
+	unaryChildren := uo.ChildNodes
+	uo.ChildNodes = []ast.Node{n}
+	uo.Type = n.Type
+	n.ChildNodes = unaryChildren
+	return transpileToExpr(uo, p, exprIsStmt)
 }
 
 func transpileCStyleCastExpr(n *ast.CStyleCastExpr, p *program.Program, exprIsStmt bool) (

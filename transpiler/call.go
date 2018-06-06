@@ -79,7 +79,7 @@ func getName(p *program.Program, firstChild ast.Node) (name string, err error) {
 
 	case *ast.ArraySubscriptExpr:
 		var expr goast.Expr
-		expr, _, _, _, err = transpileArraySubscriptExpr(fc, p)
+		expr, _, _, _, err = transpileArraySubscriptExpr(fc, p, false)
 		if err != nil {
 			return
 		}
@@ -207,9 +207,13 @@ func transpileCallExpr(n *ast.CallExpr, p *program.Program) (
 		var varName string
 		if v, ok := element[0].(*goast.Ident); ok {
 			varName = v.Name
-		} else {
-			return nil, "", nil, nil,
-				fmt.Errorf("golang ast for variable name have type %T, expect ast.Ident", element[3])
+		} else if se, ok := element[0].(*goast.SliceExpr); ok {
+			if v, ok2 := se.X.(*goast.Ident); ok2 {
+				varName = v.Name
+			} else {
+				return nil, "", nil, nil,
+					fmt.Errorf("golang ast for variable name have type %T, expect ast.Ident", element[0])
+			}
 		}
 
 		p.AddImport("sort")

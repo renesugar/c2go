@@ -84,6 +84,9 @@ func getDefaultValueForVar(p *program.Program, a *ast.VarDecl) (
 		if v, ok := a.Children()[0].(*ast.CStyleCastExpr); ok {
 			t = v.Type
 		}
+		if v, ok := a.Children()[0].(*ast.CallExpr); ok {
+			t = v.Type
+		}
 		if t != "" {
 			right, newPre, newPost, err := generateAlloc(p, allocSize, t)
 			if err != nil {
@@ -100,32 +103,25 @@ func getDefaultValueForVar(p *program.Program, a *ast.VarDecl) (
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
-		var argsName string
 		if a, ok := va.Children()[0].(*ast.ImplicitCastExpr); ok {
-			if a, ok := a.Children()[0].(*ast.DeclRefExpr); ok {
-				argsName = a.Name
-			} else {
-				return nil, "", nil, nil, fmt.Errorf("Expect DeclRefExpr for vaar, but we have %T", a)
-			}
 		} else {
 			return nil, "", nil, nil, fmt.Errorf("Expect ImplicitCastExpr for vaar, but we have %T", a)
 		}
 		src := fmt.Sprintf(`package main
 var temp = func() %s {
 	var ret %s
-	if v, ok := %s[c2goVaListPosition].(int32); ok{
+	if v, ok := c2goVaList.Args[c2goVaList.Pos].(int32); ok{
 		// for 'rune' type
 		ret = %s(v)
 	} else {
-		ret = %s[c2goVaListPosition].(%s)
+		ret = c2goVaList.Args[c2goVaList.Pos].(%s)
 	}
-	c2goVaListPosition++
+	c2goVaList.Pos++
 	return ret
 }()`, outType,
 			outType,
-			argsName,
 			outType,
-			argsName, outType)
+			outType)
 
 		// Create the AST by parsing src.
 		fset := token.NewFileSet() // positions are relative to fset
@@ -218,6 +214,28 @@ func transpileInitListExpr(e *ast.InitListExpr, p *program.Program) (goast.Expr,
 	e.Type1 = types.GenerateCorrectType(e.Type1)
 	e.Type2 = types.GenerateCorrectType(e.Type2)
 
+	var goType string
+	arrayType, arraySize := types.GetArrayTypeAndSize(e.Type1)
+	if arraySize != -1 {
+		goArrayType, err := types.ResolveType(p, arrayType)
+		if err == nil {
+			goType = goArrayType
+		}
+	} else {
+		goType2, err := types.ResolveType(p, e.Type1)
+		if err == nil {
+			goType = goType2
+		}
+	}
+	var goStruct *program.Struct
+	if e.Type1 == e.Type2 {
+		goStruct = p.GetStruct(goType)
+		if goStruct == nil {
+			goStruct = p.GetStruct("struct " + goType)
+		}
+	}
+	fieldIndex := 0
+
 	for _, node := range e.Children() {
 		// Skip ArrayFiller
 		if _, ok := node.(*ast.ArrayFiller); ok {
@@ -226,19 +244,38 @@ func transpileInitListExpr(e *ast.InitListExpr, p *program.Program) (goast.Expr,
 		}
 
 		var expr goast.Expr
+		var exprType string
 		var err error
-		expr, _, _, _, err = transpileToExpr(node, p, true)
+		expr, exprType, _, _, err = transpileToExpr(node, p, true)
 		if err != nil {
 			return nil, "", err
 		}
-
+		if goStruct != nil {
+			if fieldIndex >= len(goStruct.FieldNames) {
+				// index out of range
+				goto CONTINUE_INIT
+			}
+			fn := goStruct.FieldNames[fieldIndex]
+			if _, ok := goStruct.Fields[fn]; !ok {
+				// field name not in map
+				goto CONTINUE_INIT
+			}
+			if field, ok := goStruct.Fields[goStruct.FieldNames[fieldIndex]].(string); ok {
+				expr2, err := types.CastExpr(p, expr, exprType, field)
+				if err == nil {
+					expr = expr2
+				}
+			}
+			fieldIndex++
+		}
+	CONTINUE_INIT:
 		resp = append(resp, expr)
 	}
 
 	var t goast.Expr
 	var cTypeString string
 
-	arrayType, arraySize := types.GetArrayTypeAndSize(e.Type1)
+	arrayType, arraySize = types.GetArrayTypeAndSize(e.Type1)
 	if arraySize != -1 {
 		goArrayType, err := types.ResolveType(p, arrayType)
 		p.AddMessage(p.GenerateWarningMessage(err, e))
@@ -310,7 +347,7 @@ func transpileDeclStmt(n *ast.DeclStmt, p *program.Program) (stmts []goast.Stmt,
 	return
 }
 
-func transpileArraySubscriptExpr(n *ast.ArraySubscriptExpr, p *program.Program) (
+func transpileArraySubscriptExpr(n *ast.ArraySubscriptExpr, p *program.Program, exprIsStmt bool) (
 	_ *goast.IndexExpr, theType string, preStmts []goast.Stmt, postStmts []goast.Stmt, err error) {
 	defer func() {
 		if err != nil {
@@ -321,7 +358,7 @@ func transpileArraySubscriptExpr(n *ast.ArraySubscriptExpr, p *program.Program) 
 
 	children := n.Children()
 
-	expression, _, newPre, newPost, err := transpileToExpr(children[0], p, false)
+	expression, leftType, newPre, newPost, err := transpileToExpr(children[0], p, exprIsStmt)
 	if err != nil {
 		return nil, "", nil, nil, err
 	}
@@ -332,6 +369,19 @@ func transpileArraySubscriptExpr(n *ast.ArraySubscriptExpr, p *program.Program) 
 		return nil, "", nil, nil, err
 	}
 	preStmts, postStmts = combinePreAndPostStmts(preStmts, postStmts, newPre, newPost)
+
+	if se, ok := expression.(*goast.SliceExpr); ok && se.High == nil && se.Low == nil && se.Max == nil {
+		// simplify the expression
+		expression = se.X
+	}
+
+	isConst, indexInt := util.EvaluateConstExpr(index)
+	if isConst && indexInt < 0 {
+		indexInt = -indexInt
+		expression, leftType, newPre, newPost, err =
+			pointerArithmetic(p, expression, leftType, util.NewIntLit(int(indexInt)), "int", token.SUB)
+		index = util.NewIntLit(0)
+	}
 
 	return &goast.IndexExpr{
 		X:     expression,
